@@ -8,8 +8,10 @@ from firewall import block_ip
 # ==============================
 
 TIME_WINDOW = 5
+
 ICMP_THRESHOLD = 20
 SYN_THRESHOLD = 20
+SSH_THRESHOLD = 3
 
 # ==============================
 # Storage
@@ -17,8 +19,8 @@ SYN_THRESHOLD = 20
 
 icmp_counter = {}
 syn_counter = {}
+ssh_counter = {}
 
-# Prevent alert storm
 alerted_ips = set()
 
 # ==============================
@@ -27,10 +29,7 @@ alerted_ips = set()
 
 def detect_icmp(packet, src_ip, current_time):
 
-    icmp_layer = packet[ICMP]
-
-    # Only detect Echo Request (Type 8)
-    if icmp_layer.type != 8:
+    if packet[ICMP].type != 8:
         return
 
     if src_ip not in icmp_counter:
@@ -38,38 +37,32 @@ def detect_icmp(packet, src_ip, current_time):
 
     icmp_counter[src_ip].append(current_time)
 
-    # Keep timestamps inside sliding window
     icmp_counter[src_ip] = [
         t for t in icmp_counter[src_ip]
         if current_time - t <= TIME_WINDOW
     ]
 
-    count = len(icmp_counter[src_ip])
-
-    if count > ICMP_THRESHOLD:
+    if len(icmp_counter[src_ip]) > ICMP_THRESHOLD:
 
         if src_ip in alerted_ips:
             return
 
         alerted_ips.add(src_ip)
 
-        threat_score = 70
-        severity = "HIGH"
-
         print(f"[⚠️ ALERT] ICMP Flood detected from {src_ip}")
-        log_alert(src_ip, "ICMP_FLOOD", threat_score, severity)
+        log_alert(src_ip, "ICMP_FLOOD", 70, "HIGH")
         block_ip(src_ip)
 
-
 # ==============================
-# SYN Scan Detection
+# TCP Detection (SYN + SSH)
 # ==============================
 
-def detect_syn(packet, src_ip, current_time):
+def detect_tcp(packet, src_ip, current_time):
 
     tcp_layer = packet[TCP]
+    dst_port = tcp_layer.dport
 
-    # Detect SYN without ACK
+    # -------- SYN Scan Detection --------
     if tcp_layer.flags == "S":
 
         if src_ip not in syn_counter:
@@ -77,28 +70,45 @@ def detect_syn(packet, src_ip, current_time):
 
         syn_counter[src_ip].append(current_time)
 
-        # Keep timestamps inside sliding window
         syn_counter[src_ip] = [
             t for t in syn_counter[src_ip]
             if current_time - t <= TIME_WINDOW
         ]
 
-        count = len(syn_counter[src_ip])
-
-        if count > SYN_THRESHOLD:
+        if len(syn_counter[src_ip]) > SYN_THRESHOLD:
 
             if src_ip in alerted_ips:
                 return
 
             alerted_ips.add(src_ip)
 
-            threat_score = 60
-            severity = "MEDIUM"
-
             print(f"[⚠️ ALERT] Possible SYN Scan from {src_ip}")
-            log_alert(src_ip, "SYN_SCAN", threat_score, severity)
+            log_alert(src_ip, "SYN_SCAN", 60, "MEDIUM")
             block_ip(src_ip)
 
+    # -------- SSH Brute Force Detection --------
+    if tcp_layer.flags == "S" and dst_port == 22:
+
+        if src_ip not in ssh_counter:
+            ssh_counter[src_ip] = []
+
+        ssh_counter[src_ip].append(current_time)
+
+        ssh_counter[src_ip] = [
+            t for t in ssh_counter[src_ip]
+            if current_time - t <= TIME_WINDOW
+        ]
+
+        if len(ssh_counter[src_ip]) > SSH_THRESHOLD:
+
+            if src_ip in alerted_ips:
+                return
+
+            alerted_ips.add(src_ip)
+
+            print(f"[🚨 ALERT] SSH Brute Force suspected from {src_ip}")
+            log_alert(src_ip, "SSH_BRUTE_FORCE", 85, "CRITICAL")
+            block_ip(src_ip)
 
 # ==============================
 # Packet Callback
@@ -116,19 +126,17 @@ def packet_callback(packet):
         detect_icmp(packet, src_ip, current_time)
 
     if packet.haslayer(TCP):
-        detect_syn(packet, src_ip, current_time)
-
+        detect_tcp(packet, src_ip, current_time)
 
 # ==============================
 # Start Capture
 # ==============================
 
 def start_capture(interface="enp0s3"):
-    print(f"[*] CyberSentinel running on {interface}")
+    print(f"[*] CyberSentinel v2 running on {interface}")
     sniff(
         iface=interface,
         prn=packet_callback,
         store=False,
-     
-   filter="ip"
+        filter="ip"
     )
